@@ -171,7 +171,7 @@ struct port {
 	uint32_t last_buffer;
 
 	struct spa_latency_info latency[2];
-	unsigned int have_latency:1;
+	bool have_latency[2];
 
 	struct spa_audio_info format;
 	unsigned int valid:1;
@@ -1147,7 +1147,7 @@ static void port_update_latency(struct port *port,
 		port->info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
 		port->params[IDX_Latency].user++;
 	}
-	port->have_latency = valid;
+	port->have_latency[info->direction] = valid;
 }
 
 static void recalc_latencies(struct impl *this, enum spa_direction direction)
@@ -1161,7 +1161,7 @@ static void recalc_latencies(struct impl *this, enum spa_direction direction)
 	spa_latency_info_combine_start(&info, other);
 	for (i = 0; i < this->dir[direction].n_ports; i++) {
 		port = GET_PORT(this, direction, i);
-		if ((port->is_monitor) || !port->have_latency)
+		if ((port->is_monitor) || !port->have_latency[other])
 			continue;
 		spa_log_debug(this->log, "%p: combine %d", this, i);
 		spa_latency_info_combine(&info, &port->latency[other]);
