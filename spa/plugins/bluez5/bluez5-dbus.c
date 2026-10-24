@@ -5522,7 +5522,7 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 	struct spa_bt_transport *transport;
 	const struct media_codec *codec;
 	int profile;
-	bool sink;
+	bool sink, created = false;
 
 	if (!dbus_message_has_signature(m, "oa{sv}")) {
 		spa_log_warn(monitor->log, "invalid SetConfiguration() signature");
@@ -5554,6 +5554,7 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 		}
 
 		spa_bt_transport_set_implementation(transport, &transport_impl, transport);
+		created = true;
 
 		if (profile & SPA_BT_PROFILE_A2DP_SOURCE) {
 			transport->volumes[SPA_BT_VOLUME_ID_RX].volume = DEFAULT_AG_VOLUME;
@@ -5612,8 +5613,18 @@ static DBusHandlerResult endpoint_set_configuration(DBusConnection *conn,
 			/* BAP Server: rendering/capture device */
 			if (profile & SPA_BT_PROFILE_BAP_SOURCE)
 				transport->volumes[SPA_BT_VOLUME_ID_RX].active = true;
-			if (profile & SPA_BT_PROFILE_BAP_SINK)
+			if (profile & SPA_BT_PROFILE_BAP_SINK) {
+				/* What the server sends starts at unity, as on an
+				 * A2DP source: no remote sets this volume (VCP
+				 * controls what the server renders), and the
+				 * server's stream node applies it in software, so
+				 * the headset default would attenuate the stream
+				 * by 24 dB.
+				 */
+				if (created)
+					transport->volumes[SPA_BT_VOLUME_ID_TX].volume = DEFAULT_AG_VOLUME;
 				transport->volumes[SPA_BT_VOLUME_ID_TX].active = true;
+			}
 		}
 	} else if (profile & SPA_BT_PROFILE_BAP_BROADCAST_SOURCE) {
 		/* PW is the rendering device */
