@@ -7123,10 +7123,18 @@ static DBusHandlerResult filter_cb(DBusConnection *bus, DBusMessage *m, void *us
 			}
 			spa_log_debug(monitor->log, "Properties changed in adapter %s", path);
 
-			if (spa_streq(iface, BLUEZ_ADAPTER_INTERFACE))
+			if (spa_streq(iface, BLUEZ_ADAPTER_INTERFACE)) {
 				adapter_update_props(a, &it[1], NULL);
-			else
+			} else {
 				adapter_media_update_props(a, &it[1], NULL);
+
+				/* An adapter whose LE Audio support shows only now
+				 * (its controller set up after bluetoothd started)
+				 * gets the LE Audio application it was refused.
+				 */
+				if (a->has_adapter1_interface && a->has_media1_interface)
+					adapter_register_application(a, BLUEZ_APP_BAP);
+			}
 		}
 		else if (spa_streq(iface, BLUEZ_DEVICE_INTERFACE)) {
 			struct spa_bt_device *d;
