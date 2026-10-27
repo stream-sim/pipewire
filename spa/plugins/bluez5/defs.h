@@ -757,6 +757,7 @@ bool spa_bt_transport_volume_enabled(struct spa_bt_transport *transport);
 
 int spa_bt_transport_acquire(struct spa_bt_transport *t, bool optional);
 int spa_bt_transport_release(struct spa_bt_transport *t);
+int spa_bt_transport_release_now(struct spa_bt_transport *t);
 int spa_bt_transport_keepalive(struct spa_bt_transport *t, bool keepalive);
 int spa_bt_transport_ensure_sco_io(struct spa_bt_transport *t, struct spa_loop *data_loop, struct spa_system *data_system);
 

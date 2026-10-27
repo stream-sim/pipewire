@@ -1308,6 +1308,39 @@ static bool device_set_equal(struct device_set *a, struct device_set *b)
 	return true;
 }
 
+static void remove_node(struct impl *this, uint32_t id);
+
+/*
+ * Make an A2DP node the one of transport t (none if NULL), and leave it alone
+ * when it already is. A2DP's two directions are separate streams: when one of
+ * them is reconfigured, by us or by the device, the other one plays on.
+ */
+static void sync_a2dp_node(struct impl *this, struct spa_bt_transport *t,
+		uint32_t id, const char *factory_name, bool a2dp_duplex)
+{
+	struct node *node = &this->nodes[id];
+
+	if (t && node->active && node->transport == t && node->a2dp_duplex == a2dp_duplex)
+		return;
+
+	remove_node(this, id);
+	if (t)
+		emit_node(this, t, id, factory_name, a2dp_duplex);
+}
+
+static void sync_a2dp_dynamic_node(struct impl *this, struct spa_bt_transport *t,
+		uint32_t id, const char *factory_name)
+{
+	struct dynamic_node *node = &this->dyn_nodes[id];
+
+	if (t && node->transport == t)
+		return;
+
+	remove_dynamic_node(node);
+	if (t)
+		emit_dynamic_node(this, t, id, factory_name, false);
+}
+
 static int emit_nodes(struct impl *this)
 {
 	struct spa_bt_transport *t;
@@ -1370,40 +1403,56 @@ static int emit_nodes(struct impl *this)
 	case DEVICE_PROFILE_A2DP:
 	case DEVICE_PROFILE_A2DP_AUTO_PREFER_QUALITY:
 	case DEVICE_PROFILE_A2DP_AUTO_PREFER_LATENCY:
-		if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE) {
-			t = find_transport(this, SPA_BT_PROFILE_A2DP_SOURCE);
-			if (t) {
-				this->props.codec = t->media_codec->id;
-				emit_dynamic_node(this, t, DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_A2DP_SOURCE, false);
+	{
+		/*
+		 * The device's stream to us has a dynamic node, our stream to the
+		 * device a sink node. A duplex codec carries the other direction
+		 * on the same transport. Our stream decides the profile's codec.
+		 */
+		struct spa_bt_transport *from_dev = NULL, *to_dev = NULL;
+		struct spa_bt_transport *sink = NULL, *duplex_source = NULL;
+		bool sink_duplex = false, dummy_input;
 
-				if (t->media_codec->duplex_codec)
-					emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK, true);
+		if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE)
+			from_dev = find_transport(this, SPA_BT_PROFILE_A2DP_SOURCE);
+		if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SINK)
+			to_dev = find_transport(this, SPA_BT_PROFILE_A2DP_SINK);
+
+		if (from_dev) {
+			this->props.codec = from_dev->media_codec->id;
+			if (from_dev->media_codec->duplex_codec) {
+				sink = from_dev;
+				sink_duplex = true;
 			}
 		}
-
-		if (this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SINK) {
-			t = find_transport(this, SPA_BT_PROFILE_A2DP_SINK);
-			if (t) {
-				this->props.codec = t->media_codec->id;
-				emit_node(this, t, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK, false);
-
-				if (t->media_codec->duplex_codec) {
-					emit_node(this, t,
-						DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_A2DP_SOURCE, true);
-				}
-			}
+		if (to_dev) {
+			this->props.codec = to_dev->media_codec->id;
+			sink = to_dev;
+			sink_duplex = false;
+			if (to_dev->media_codec->duplex_codec)
+				duplex_source = to_dev;
 		}
 
 		/* Setup route for HFP input, for tracking its volume even though there is
 		 * no node emitted yet. */
-		if ((this->bt_dev->connected_profiles & SPA_BT_PROFILE_HEADSET_HEAD_UNIT) &&
-				!(this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE) &&
-				!this->nodes[DEVICE_ID_SOURCE].active)
+		dummy_input = (this->bt_dev->connected_profiles & SPA_BT_PROFILE_HEADSET_HEAD_UNIT) &&
+				!(this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE);
+
+		/* The dynamic node has the same object id as the duplex source: sync the
+		 * latter first, so that its removal does not remove the former. */
+		if (duplex_source || !dummy_input || this->nodes[DEVICE_ID_SOURCE].transport)
+			sync_a2dp_node(this, duplex_source, DEVICE_ID_SOURCE,
+					SPA_NAME_API_BLUEZ5_A2DP_SOURCE, true);
+		sync_a2dp_node(this, sink, DEVICE_ID_SINK, SPA_NAME_API_BLUEZ5_A2DP_SINK, sink_duplex);
+		sync_a2dp_dynamic_node(this, from_dev, DEVICE_ID_SOURCE, SPA_NAME_API_BLUEZ5_A2DP_SOURCE);
+
+		if (dummy_input && !this->nodes[DEVICE_ID_SOURCE].active)
 			init_dummy_input_node(this, DEVICE_ID_SOURCE);
 
 		if (!this->props.codec)
 			this->props.codec = SPA_BLUETOOTH_AUDIO_CODEC_SBC;
 		break;
+	}
 	case DEVICE_PROFILE_BAP:
 	case DEVICE_PROFILE_BAP_SINK:
 	case DEVICE_PROFILE_BAP_SOURCE:
@@ -1510,6 +1559,23 @@ static void emit_info(struct impl *this, bool full)
 	}
 }
 
+static void remove_node(struct impl *this, uint32_t id)
+{
+	struct node *node = &this->nodes[id];
+
+	node_offload_set_active(node, false);
+	if (node->transport) {
+		if (node->active)
+			spa_bt_transport_emit_remove_node(node->transport);
+		spa_hook_remove(&node->transport_listener);
+		node->transport = NULL;
+	}
+	if (node->active) {
+		spa_device_emit_object_info(&this->hooks, id, NULL);
+		node->active = false;
+	}
+}
+
 static void emit_remove_nodes(struct impl *this)
 {
 	spa_log_debug(this->log, "%p: remove nodes", this);
@@ -1517,22 +1583,24 @@ static void emit_remove_nodes(struct impl *this)
 	for (uint32_t i = 0; i < SPA_N_ELEMENTS(this->dyn_nodes); i++)
 		remove_dynamic_node (&this->dyn_nodes[i]);
 
-	for (uint32_t i = 0; i < SPA_N_ELEMENTS(this->nodes); i++) {
-		struct node * node = &this->nodes[i];
-		node_offload_set_active(node, false);
-		if (node->transport) {
-			if (node->active)
-				spa_bt_transport_emit_remove_node(node->transport);
-			spa_hook_remove(&node->transport_listener);
-			node->transport = NULL;
-		}
-		if (node->active) {
-			spa_device_emit_object_info(&this->hooks, i, NULL);
-			node->active = false;
-		}
-	}
+	for (uint32_t i = 0; i < SPA_N_ELEMENTS(this->nodes); i++)
+		remove_node(this, i);
 
 	this->props.offload_active = false;
+}
+
+/* Remove the nodes of one transport, leaving the others playing */
+static void remove_transport_nodes(struct impl *this, struct spa_bt_transport *t)
+{
+	spa_log_debug(this->log, "%p: remove nodes of transport %p", this, t);
+
+	for (uint32_t i = 0; i < SPA_N_ELEMENTS(this->dyn_nodes); i++)
+		if (this->dyn_nodes[i].transport == t)
+			remove_dynamic_node(&this->dyn_nodes[i]);
+
+	for (uint32_t i = 0; i < SPA_N_ELEMENTS(this->nodes); i++)
+		if (this->nodes[i].transport == t)
+			remove_node(this, i);
 }
 
 static bool validate_profile(struct impl *this, uint32_t profile,
@@ -1556,9 +1624,19 @@ static int set_profile(struct impl *this, uint32_t profile, enum spa_bluetooth_a
 	    (this->profile != DEVICE_PROFILE_HSP_HFP || codec == this->props.codec))
 		return 0;
 
-	emit_remove_nodes(this);
+	if (profile_is_a2dp(this->profile) && profile_is_a2dp(profile)) {
+		/* Only the codec of our stream changes: the device's stream to us
+		 * plays on. Releasing its transport would suspend it. */
+		struct spa_bt_transport *t = find_transport(this, SPA_BT_PROFILE_A2DP_SINK);
 
-	spa_bt_device_release_transports(this->bt_dev);
+		if (t) {
+			remove_transport_nodes(this, t);
+			spa_bt_transport_release_now(t);
+		}
+	} else {
+		emit_remove_nodes(this);
+		spa_bt_device_release_transports(this->bt_dev);
+	}
 
 	this->profile = profile;
 	this->prev_bt_connected_profiles = this->bt_dev->connected_profiles;
@@ -1659,7 +1737,9 @@ static void codec_switched(void *userdata, int status)
 	if (status < 0)
 		spa_log_error(this->log, "failed to switch codec (%d)", status);
 
-	emit_remove_nodes(this);
+	/* A2DP nodes are refreshed per direction, see emit_nodes() */
+	if (!profile_is_a2dp(this->profile))
+		emit_remove_nodes(this);
 	emit_nodes(this);
 
 	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
@@ -1788,7 +1868,9 @@ static void profiles_changed(void *userdata, uint32_t connected_change)
 	}
 
 	if (nodes_changed) {
-		emit_remove_nodes(this);
+		/* A2DP nodes are refreshed per direction, see emit_nodes() */
+		if (!profile_is_a2dp(this->profile))
+			emit_remove_nodes(this);
 		emit_nodes(this);
 	}
 

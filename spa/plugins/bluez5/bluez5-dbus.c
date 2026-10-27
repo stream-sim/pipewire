@@ -3741,7 +3741,7 @@ int spa_bt_transport_release(struct spa_bt_transport *transport)
 	}
 }
 
-static int spa_bt_transport_release_now(struct spa_bt_transport *transport)
+int spa_bt_transport_release_now(struct spa_bt_transport *transport)
 {
 	int res;
 
