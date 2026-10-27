@@ -3081,6 +3081,21 @@ bool spa_bt_device_supports_media_codec(struct spa_bt_device *device, const stru
 	return false;
 }
 
+/* Whether the device has an A2DP source endpoint that we can receive from */
+bool spa_bt_device_has_a2dp_source(struct spa_bt_device *device)
+{
+	const struct media_codec * const *c;
+
+	for (c = device->monitor->media_codecs; *c != NULL; ++c) {
+		if ((*c)->kind != MEDIA_CODEC_A2DP)
+			continue;
+		if (spa_bt_device_supports_media_codec(device, *c, SPA_BT_PROFILE_A2DP_SOURCE))
+			return true;
+	}
+
+	return false;
+}
+
 const struct media_codec **spa_bt_device_get_supported_media_codecs(struct spa_bt_device *device, size_t *count)
 {
 	struct spa_bt_monitor *monitor = device->monitor;
@@ -5375,6 +5390,13 @@ int spa_bt_device_ensure_media_codec(struct spa_bt_device *device, const struct 
 
 		spa_list_for_each(t, &device->transport_list, device_link) {
 			if (t->media_codec != codec)
+				continue;
+
+			/* A switch of one A2DP direction leaves the other alone, so
+			 * the other direction's transport is not part of the result.
+			 * A BAP switch clears the endpoints it does not select.
+			 */
+			if (codec->kind == MEDIA_CODEC_A2DP && !(t->profile & profiles))
 				continue;
 
 			found_profiles |= t->profile;

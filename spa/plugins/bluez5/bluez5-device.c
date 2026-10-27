@@ -344,11 +344,16 @@ static const struct media_codec *get_supported_media_codec(struct impl *this, en
 		return NULL;
 
 	if (priority) {
+		/* Rank among the codecs of the same profile, so that the best of them
+		 * gets the base profile name. */
 		*priority = 0;
 		for (i = 0; i < this->supported_codec_count; ++i) {
-			if (this->supported_codecs[i] == media_codec)
+			const struct media_codec *c = this->supported_codecs[i];
+
+			if (c == media_codec)
 				break;
-			if (this->supported_codecs[i]->kind == media_codec->kind)
+			if (c->kind == media_codec->kind &&
+					spa_bt_device_supports_media_codec(this->bt_dev, c, profile))
 				++(*priority);
 		}
 	}
@@ -1643,17 +1648,19 @@ static int set_profile(struct impl *this, uint32_t profile, enum spa_bluetooth_a
 
 	/*
 	 * A2DP/BAP: ensure there's a transport with the selected codec (0 means any).
-	 * Don't try to switch codecs when the device is in the A2DP source role, since
-	 * devices do not appear to like that.
+	 *
+	 * For A2DP, the codec is the one of the stream we send to the device's
+	 * A2DP sink, also when the device is connected in both roles. The stream
+	 * the device sends us is configured by the device, as its source: we
+	 * don't reconfigure it, since devices do not appear to like that, and a
+	 * device running PipeWire picks the codec of that stream with its own
+	 * profile. If our profile also set the codec of the stream it sends, two
+	 * different choices, one on each side, would undo each other on every
+	 * reconfiguration.
 	 *
 	 * For BAP, only BAP client can configure the codec.
-	 *
-	 * XXX: codec switching also currently does not work in the duplex or
-	 * XXX: source-only case, as it will only switch the sink, and we only
-	 * XXX: list the sink codecs here. TODO: fix this
 	 */
-	if ((profile_is_a2dp (profile) || (profile_is_bap(profile) && is_bap_client(this)))
-			&& !(this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_SOURCE)) {
+	if (profile_is_a2dp(profile) || (profile_is_bap(profile) && is_bap_client(this))) {
 		int ret;
 		const struct media_codec *codecs[64];
 		uint32_t profiles;
@@ -1673,15 +1680,15 @@ static int set_profile(struct impl *this, uint32_t profile, enum spa_bluetooth_a
 			profiles = this->bt_dev->profiles & SPA_BT_PROFILE_BAP_DUPLEX;
 			break;
 		case DEVICE_PROFILE_A2DP:
-			profiles = this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_DUPLEX;
+			profiles = SPA_BT_PROFILE_A2DP_SINK;
 			break;
 		case DEVICE_PROFILE_A2DP_AUTO_PREFER_QUALITY:
 			get_media_codecs(this, CODEC_ORDER_QUALITY, 0, codecs, SPA_N_ELEMENTS(codecs));
-			profiles = this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_DUPLEX;
+			profiles = SPA_BT_PROFILE_A2DP_SINK;
 			break;
 		case DEVICE_PROFILE_A2DP_AUTO_PREFER_LATENCY:
 			get_media_codecs(this, CODEC_ORDER_LATENCY, 0, codecs, SPA_N_ELEMENTS(codecs));
-			profiles = this->bt_dev->connected_profiles & SPA_BT_PROFILE_A2DP_DUPLEX;
+			profiles = SPA_BT_PROFILE_A2DP_SINK;
 			break;
 		default:
 			profiles = 0;
@@ -2315,6 +2322,15 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 			return NULL;
 		}
 
+		/*
+		 * A device that can send us A2DP keeps the duplex name while its
+		 * stream is down: it closes that stream to switch its codec, and
+		 * a session manager would not find a profile it stored by name
+		 * in the meantime, and select another one.
+		 */
+		if (spa_bt_device_has_a2dp_source(device))
+			profile |= SPA_BT_PROFILE_A2DP_SOURCE;
+
 		/* A2DP will only enlist codec profiles */
 		if (!codec)
 			return NULL;
@@ -2323,7 +2339,9 @@ static struct spa_pod *build_profile(struct impl *this, struct spa_pod_builder *
 		n_sink++;
 		if (codec) {
 			int prio;
-			const struct media_codec *media_codec = get_supported_media_codec(this, codec, &prio, profile);
+			/* The codec is the one we send: see set_profile() */
+			const struct media_codec *media_codec = get_supported_media_codec(this, codec, &prio,
+					SPA_BT_PROFILE_A2DP_SINK);
 			if (media_codec == NULL) {
 				errno = EINVAL;
 				return NULL;
