@@ -618,12 +618,15 @@ static int32_t decode_data(struct impl *this, uint8_t *src, uint32_t src_size,
 			this->plc_packets -= lost;
 
 		if (this->plc_packets &&
-				port->buffer.level > spa_bt_decode_buffer_get_target_latency(&port->buffer)) {
+				port->buffer.level > spa_bt_decode_buffer_get_target_latency(&port->buffer) &&
+				spa_bt_decode_buffer_get_size(&port->buffer) / port->frame_size >=
+				(uint32_t)spa_bt_decode_buffer_get_target_latency(&port->buffer)) {
 			/* We already produced PLC audio for this packet, and have enough
 			 * data, so drop the packet.
 			 */
 			spa_log_debug(this->log, "%p: PLC drop %u sn:%u", this, this->plc_packets, seqnum);
 			this->plc_packets--;
+			this->seqnum = seqnum;
 			return 0;
 		}
 
