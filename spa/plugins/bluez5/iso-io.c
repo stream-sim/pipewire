@@ -100,6 +100,9 @@ struct stream {
 	/** Stream packet sequence number, relative to group::rx_sync */
 	int64_t rx_pos;
 
+	/** Controller timestamp of the last received packet, 0 if there is none */
+	uint64_t rx_hw_time;
+
 	/** Current graph clock position */
 	uint64_t position;
 };
@@ -907,13 +910,13 @@ int32_t spa_bt_iso_io_get_source_target_latency(struct spa_bt_iso_io *this)
  *
  * Must be called from data thread.
  */
-int64_t spa_bt_iso_io_recv(struct spa_bt_iso_io *this, int64_t now)
+int64_t spa_bt_iso_io_recv(struct spa_bt_iso_io *this, int64_t now, uint64_t hw_time)
 {
 	struct stream *stream = SPA_CONTAINER_OF(this, struct stream, this);
 	struct group *group = stream->group;
 	struct clock_sync *sync = &group->rx_sync;
 	struct stream *s;
-	bool resync = false;
+	bool resync = false, aligned = false;
 	int64_t err, t;
 
 	spa_assert(stream->source_buf);
@@ -924,6 +927,34 @@ int64_t spa_bt_iso_io_recv(struct spa_bt_iso_io *this, int64_t now)
 	}
 
 	stream->rx_pos++;
+
+	/* All BIS of a BIG event have the same 32-bit microsecond timestamp, while
+	 * arrival times can pair different frames.
+	 */
+	if (hw_time) {
+		spa_list_for_each(s, &group->streams, link) {
+			int64_t diff, pos;
+
+			if (s == stream || !s->source_buf || !s->rx_hw_time)
+				continue;
+
+			diff = (int32_t)((uint32_t)(hw_time / SPA_NSEC_PER_USEC) -
+					(uint32_t)(s->rx_hw_time / SPA_NSEC_PER_USEC));
+			diff *= SPA_NSEC_PER_USEC;
+			pos = s->rx_pos + (diff >= 0 ? diff + group->duration_rx / 2 : diff - group->duration_rx / 2)
+				/ (int64_t)group->duration_rx;
+
+			if (pos != stream->rx_pos) {
+				spa_log_debug(group->log, "%p: ISO rx-align group:%u fd:%d pos:%" PRIi64 " -> %" PRIi64,
+						group, group->id, stream->fd, stream->rx_pos, pos);
+				stream->rx_pos = pos;
+			}
+			aligned = true;
+			break;
+		}
+		stream->rx_hw_time = hw_time;
+	}
+
 	t = sync->base_time + group->duration_rx * stream->rx_pos;
 	err = now - t;
 
@@ -934,6 +965,8 @@ int64_t spa_bt_iso_io_recv(struct spa_bt_iso_io *this, int64_t now)
 	}
 
 	spa_list_for_each(s, &group->streams, link) {
+		if (aligned)
+			break;
 		if (s == stream || !s->source_buf)
 			continue;
 		if (SPA_ABS(now - s->source_buf->rx.nsec) < group->duration_rx / 2 &&

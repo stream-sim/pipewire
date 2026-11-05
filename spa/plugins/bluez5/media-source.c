@@ -667,7 +667,7 @@ static void add_data(struct impl *this, uint8_t *src, uint32_t src_size, uint64_
 	spa_log_trace(this->log, "%p: read socket data size:%d", this, src_size);
 
 	if (this->transport->iso_io)
-		now = spa_bt_iso_io_recv(this->transport->iso_io, now);
+		now = spa_bt_iso_io_recv(this->transport->iso_io, now, this->recv.hw_time);
 
 	do {
 		int32_t consumed;

@@ -413,6 +413,8 @@ struct spa_bt_recvmsg_data {
 	int fd;
 	int64_t offset;
 	int64_t err;
+	/* Controller timestamp of the last packet, 0 if there is none */
+	uint64_t hw_time;
 };
 
 static inline void spa_bt_recvmsg_update_clock(struct spa_bt_recvmsg_data *data, uint64_t *now)
@@ -474,6 +476,7 @@ static inline ssize_t spa_bt_recvmsg(struct spa_bt_recvmsg_data *r, void *buf, s
 	ssize_t res;
 
 	*seqnum = -1;
+	r->hw_time = 0;
 
 	res = recvmsg(r->fd, &msg, MSG_DONTWAIT);
 	if (res < 0 || !rx_time)
@@ -487,6 +490,7 @@ static inline ssize_t spa_bt_recvmsg(struct spa_bt_recvmsg_data *r, void *buf, s
 		if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_TIMESTAMPING) {
 			tss = (struct scm_timestamping *)CMSG_DATA(cmsg);
 			t = SPA_TIMESPEC_TO_NSEC(&tss->ts[0]);
+			r->hw_time = SPA_TIMESPEC_TO_NSEC(&tss->ts[2]);
 		} else if (cmsg->cmsg_level == SOL_BLUETOOTH && cmsg->cmsg_type == BT_SCM_PKT_SEQNUM) {
 			*seqnum = *((uint16_t *)CMSG_DATA(cmsg));
 		}
@@ -526,7 +530,8 @@ static inline void spa_bt_recvmsg_init(struct spa_bt_recvmsg_data *data, int fd,
 	if (getsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &flags, &len) < 0)
 		spa_log_info(log, "failed to get SO_TIMESTAMPING");
 
-	flags |= SOF_TIMESTAMPING_SOFTWARE | SOF_TIMESTAMPING_RX_SOFTWARE;
+	flags |= SOF_TIMESTAMPING_SOFTWARE | SOF_TIMESTAMPING_RX_SOFTWARE |
+		SOF_TIMESTAMPING_RAW_HARDWARE | SOF_TIMESTAMPING_RX_HARDWARE;
 	if (setsockopt(fd, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags)) < 0)
 		spa_log_info(log, "failed to set SO_TIMESTAMPING");
 
