@@ -326,6 +326,9 @@ struct stream {
 	int64_t compensate_samples;	/* for main loop */
 
 	unsigned int ready:1;
+	int64_t ready_cycle;
+	/* Input buffer of the cycle that triggered the combine stream */
+	struct pw_buffer *in;
 	unsigned int added:1;
 	unsigned int have_latency:1;
 };
@@ -750,20 +753,51 @@ static void stream_input_process(void *d)
 {
 	struct stream *s = d, *t;
 	struct impl *impl = s->impl;
+	struct pw_time time;
 	bool ready = true;
 
+	pw_stream_get_time_n(s->stream, &time, sizeof(time));
+
 	s->ready = true;
+	s->ready_cycle = time.now;
 	pw_log_debug("stream ready %p", s);
+
+	/* A stream still marked ready from an earlier graph cycle would give its
+	 * old buffer, and the streams would stay a cycle apart.
+	 */
 	spa_list_for_each(t, &impl->streams, link) {
-		if (!t->ready) {
+		if (!t->ready || t->ready_cycle != time.now) {
 			ready = false;
 			break;
 		}
 	}
-	if (ready) {
-		pw_log_debug("do trigger");
-		pw_stream_trigger_process(impl->combine);
+	if (!ready)
+		return;
+
+	/* Take the buffers now, while they are all from this cycle. The combine
+	 * stream can run later, between the input streams of the next cycle, and
+	 * would then pair a new buffer with an old one.
+	 */
+	spa_list_for_each(t, &impl->streams, link) {
+		struct pw_buffer *b;
+
+		while ((b = pw_stream_dequeue_buffer(t->stream)) != NULL) {
+			if (t->in)
+				pw_stream_queue_buffer(t->stream, t->in);
+			t->in = b;
+		}
+		t->ready = false;
 	}
+	pw_log_debug("do trigger");
+	pw_stream_trigger_process(impl->combine);
+}
+
+static void stream_remove_buffer(void *d, struct pw_buffer *buffer)
+{
+	struct stream *s = d;
+
+	if (s->in == buffer)
+		s->in = NULL;
 }
 
 static void stream_state_changed(void *d, enum pw_stream_state old,
@@ -814,6 +848,7 @@ static const struct pw_stream_events stream_events = {
 	.destroy = stream_destroy,
 	.state_changed = stream_state_changed,
 	.param_changed = stream_param_changed,
+	.remove_buffer = stream_remove_buffer,
 };
 
 struct stream_info {
@@ -1278,20 +1313,12 @@ static void combine_output_process(void *d)
 		if (check_stream_delay(s))
 			delay_changed = true;
 
-		in = NULL;
-		while (true) {
-			struct pw_buffer *t;
-			if ((t = pw_stream_dequeue_buffer(s->stream)) == NULL)
-				break;
-			if (in)
-				pw_stream_queue_buffer(s->stream, in);
-			in = t;
-		}
+		in = s->in;
+		s->in = NULL;
 		if (in == NULL) {
 			pw_log_debug("%p: out of input buffers: %m", s);
 			continue;
 		}
-		s->ready = false;
 
 		for (j = 0; j < in->buffer->n_datas; j++) {
 			struct spa_data *ds, *dd;
