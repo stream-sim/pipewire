@@ -388,6 +388,10 @@ static int get_bap_server_latency(struct impl *this, unsigned int *node_latency)
 		+ this->delay_sink.min_rate;
 
 	latency = sink_latency + packet_latency;
+
+	/* The buffer level includes the resampler delay, which isn't data to read */
+	if (this->resampling && port->rate_match)
+		latency += port->rate_match->delay;
 	latency_quanta = this->delay_sink.min_quantum;
 
 	if (!node_latency) {
