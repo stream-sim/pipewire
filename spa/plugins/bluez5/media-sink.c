@@ -1505,8 +1505,12 @@ static void media_on_timeout(struct spa_source *source)
 	status = this->transport_started ? SPA_STATUS_NEED_DATA : SPA_STATUS_HAVE_DATA;
 
 	spa_log_trace(this->log, "%p: %d -> %d", this, io->status, status);
-	io->status = status;
-	io->buffer_id = SPA_ID_INVALID;
+
+	/* A buffer the sink hasn't taken yet would never get back to the converter */
+	if (io->status != SPA_STATUS_HAVE_DATA || io->buffer_id >= port->n_buffers) {
+		io->status = status;
+		io->buffer_id = SPA_ID_INVALID;
+	}
 	spa_node_call_ready(&this->callbacks, status);
 
 	set_timeout(this, this->next_time);
