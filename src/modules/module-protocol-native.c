@@ -1187,6 +1187,9 @@ on_remote_data(void *data, int fd, uint32_t mask)
 	if (mask & SPA_IO_IN) {
 		if ((res = process_remote(impl)) < 0)
 			goto error;
+		/* a callback disconnected the core */
+		if (impl->disconnecting)
+			goto done;
 	}
 	if (mask & SPA_IO_OUT || impl->need_flush) {
 		if (!impl->connected) {
